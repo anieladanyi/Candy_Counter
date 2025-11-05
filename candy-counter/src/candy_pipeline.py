@@ -16,20 +16,22 @@ def _debug_save_masks(masks, out_dir):
 
 # HSV színtartományok (finomítható – jelenleg kissé szigorúbb S/V a háttér kizárására)
 COLOR_RANGES = {
-    # red: szűkebb alsó sáv, hogy ne menjen az orange-ra
-    "red1":   ((0,   45, 45), (7, 255, 255)),     # H: 0..7
-    "red2":   ((168, 45, 45), (179, 255, 255)),
+    # A vörös továbbra is két sávból áll, így lefedi a 0 körüli H értékeket
+    "red1":   ((0,   32, 28), (8, 255, 255)),
+    "red2":   ((168, 32, 28), (179, 255, 255)),
 
-    # orange: külön sáv, felfelé nem ér el a yellow-ba
-    "orange": ((8,   40, 40), (22, 255, 255)),    # H: 8..22
+    # Narancs és sárga határértékek: lazább S/V, hogy a világosabb cukorkák és fakó sarkok se essenek ki
+    "orange": ((6,   18, 38), (22, 255, 255)),
+    "yellow": ((18,  12, 50), (48, 255, 255)),
 
-    # yellow: lejjebb nem ér be az orange-ba
-    "yellow": ((23,  40, 40), (40, 255, 255)),    # H: 23..40
-
-    "green":  ((50,  40, 40), (85, 255, 255)),
-    "blue":   ((92,  40, 40), (120,255, 255)),
-    "purple": ((125, 40, 40), (165,255, 255)),
+    # A többi színhez elegendő a korábbi tartomány, de engedünk a minimális telítettségen/fényességen
+    "green":  ((50,  24, 38), (85, 255, 255)),
+    "blue":   ((90,  24, 38), (125,255, 255)),
+    "purple": ((125, 24, 38), (170,255, 255)),
 }
+
+_GLOBAL_S_MIN = min(rng[0][1] for rng in COLOR_RANGES.values())
+_GLOBAL_V_MIN = min(rng[0][2] for rng in COLOR_RANGES.values())
 
 
 
@@ -51,7 +53,7 @@ class Params:
     blur_ksize: int = 5
     morph_open: int = 3
     morph_close: int = 3
-    min_area: int = 150
+    min_area: int = 120
     max_area: int = 200000
     circularity_min: float = 0.6
     downscale_max: int = 1400
@@ -124,7 +126,7 @@ def _contours_from_binary(bin_img):
     contours, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contours
 
-def _filter_and_pack_contours(contours, bgr, p: Params):
+def _filter_and_pack_contours(contours, bgr, p: Params, *, color_hint=None, source="contour"):
     detections = []
     for cid, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
@@ -146,13 +148,36 @@ def _filter_and_pack_contours(contours, bgr, p: Params):
             "cy": float(cy),
             "r": float(radius),
             "area": float(area),
-            "circularity": circularity
+            "circularity": circularity,
+            "color_hint": color_hint,
+            "source": source
         })
     return detections
 
 def find_candies(bgr, mask_all, p: Params):
     contours = _contours_from_binary(mask_all)
     return _filter_and_pack_contours(contours, bgr, p)
+
+
+def find_candies_per_color(bgr, masks, p: Params):
+    detections = []
+    for cname, cmask in masks.items():
+        if cv2.countNonZero(cmask) == 0:
+            continue
+        cleaned = morphology(cmask, p)
+        contours = _contours_from_binary(cleaned)
+        if not contours:
+            continue
+        detections.extend(
+            _filter_and_pack_contours(
+                contours,
+                bgr,
+                p,
+                color_hint=cname,
+                source=f"mask_{cname}"
+            )
+        )
+    return detections
 
 def _nms_circles(dets, center_thresh_ratio=0.65):
     """
@@ -176,13 +201,65 @@ def _nms_circles(dets, center_thresh_ratio=0.65):
     return kept
 
 
-    
+def _merge_detections(*det_lists, center_thresh_ratio=0.45):
+    merged = []
+
+    for dets in det_lists:
+        if not dets:
+            continue
+        for det in dets:
+            candidate = dict(det)
+            keep = True
+            for idx, kept in enumerate(merged):
+                dx = candidate["cx"] - kept["cx"]
+                dy = candidate["cy"] - kept["cy"]
+                dist = (dx * dx + dy * dy) ** 0.5
+                min_r = max(1e-6, min(candidate["r"], kept["r"]))
+                if dist < center_thresh_ratio * min_r:
+                    cand_has_cnt = candidate.get("cnt") is not None
+                    kept_has_cnt = kept.get("cnt") is not None
+                    cand_has_hint = candidate.get("color_hint") is not None
+                    kept_has_hint = kept.get("color_hint") is not None
+                    if cand_has_cnt and not kept_has_cnt:
+                        merged[idx] = candidate
+                    elif cand_has_hint and not kept_has_hint:
+                        merged[idx] = candidate
+                    elif cand_has_cnt == kept_has_cnt and cand_has_hint == kept_has_hint and \
+                            candidate.get("area", 0) > kept.get("area", 0):
+                        merged[idx] = candidate
+                    keep = False
+                    break
+            if keep:
+                merged.append(candidate)
+
+    for idx, det in enumerate(merged):
+        det["id"] = idx
+    return merged
+
+
+def _rescale_detection(det, scale):
+    if scale == 1.0:
+        return dict(det)
+
+    inv = 1.0 / max(scale, 1e-6)
+    scaled = dict(det)
+    scaled["cx"] = det["cx"] * inv
+    scaled["cy"] = det["cy"] * inv
+    scaled["r"] = det["r"] * inv
+    scaled["area"] = det["area"] * (inv * inv)
+
+    if det.get("bbox") is not None:
+        x, y, w, h = det["bbox"]
+        scaled["bbox"] = (x * inv, y * inv, w * inv, h * inv)
+
+    cnt = det.get("cnt")
+    if cnt is not None:
+        scaled["cnt"] = (cnt.astype(np.float32) * inv).astype(cnt.dtype)
+
+    return scaled
+
 
 def find_candies_hough(bgr, hsv, p: Params):
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    gray = cv2.medianBlur(gray, 5)
-
     # 1) Szürke + kontrasztjavítás
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)                  # jobb éldetektáláshoz
@@ -215,7 +292,9 @@ def find_candies_hough(bgr, hsv, p: Params):
                 "bbox": (x - r, y - r, 2 * r, 2 * r),
                 "cx": float(x), "cy": float(y),
                 "r": float(r), "area": area,
-                "circularity": 1.0
+                "circularity": 1.0,
+                "color_hint": None,
+                "source": "hough"
             })
     # ÚJ: duplikátumok kiszűrése
     detections = _nms_circles(detections, center_thresh_ratio=0.65)
@@ -252,7 +331,7 @@ def watershed_split(bgr, mask_all, p: Params):
         if not contours:
             continue
         cnt = max(contours, key=cv2.contourArea)
-        detections.extend(_filter_and_pack_contours([cnt], bgr, p))
+        detections.extend(_filter_and_pack_contours([cnt], bgr, p, source="watershed"))
     return detections, dist
 
 def classify_color(hsv, det, masks):
@@ -267,42 +346,41 @@ def classify_color(hsv, det, masks):
             best_color = cname
     return best_color
 
-def classify_color_in_circle(hsv, cx, cy, r, color_ranges):
-    # körmaszk (szűkítve, hogy a peremfény ne zavarjon)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, (int(cx), int(cy)), int(r * 0.9), 255, -1)
+def classify_color_in_circle(hsv, cx, cy, r, masks):
+    region_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    cv2.circle(region_mask, (int(cx), int(cy)), max(int(r * 0.88), 1), 255, -1)
 
-    # csak elég színes és világos pixelek számítsanak (háttér kizárása)
     S = hsv[:, :, 1]; V = hsv[:, :, 2]
-    sv_mask = ((S >= 45) & (V >= 45)).astype(np.uint8) * 255
-    mask = cv2.bitwise_and(mask, sv_mask)
+    s_floor = max(10, _GLOBAL_S_MIN - 2)
+    v_floor = max(10, _GLOBAL_V_MIN - 2)
+    sv_mask = ((S >= s_floor) & (V >= v_floor)).astype(np.uint8) * 255
+    region_mask = cv2.bitwise_and(region_mask, sv_mask)
 
-    # H-hisztogram (ha nincs elég pixel, mixed)
+    best_color, best_hits = "mixed", 0
+    for cname, cmask in masks.items():
+        hits = cv2.countNonZero(cv2.bitwise_and(cmask, region_mask))
+        if hits > best_hits:
+            best_hits = hits
+            best_color = cname
+
+    if best_hits > 0:
+        return best_color
+
     H = hsv[:, :, 0]
-    hist = cv2.calcHist([H], [0], mask, [180], [0, 180]).flatten()
+    hist = cv2.calcHist([H], [0], region_mask, [180], [0, 180]).flatten()
     if hist.sum() < 1:
         return "mixed"
     peak_h = int(hist.argmax())
 
-    def in_band(h, lo, hi): return lo <= h <= hi
+    def in_band(h, lo, hi):
+        return lo <= h <= hi
 
-    # SORREND: yellow -> orange -> red -> green/blue/purple
-    if in_band(peak_h, COLOR_RANGES["yellow"][0][0], COLOR_RANGES["yellow"][1][0]):
-        return "yellow"
-    if in_band(peak_h, COLOR_RANGES["orange"][0][0], COLOR_RANGES["orange"][1][0]):
-        return "orange"
-    if in_band(peak_h, COLOR_RANGES["red1"][0][0], COLOR_RANGES["red1"][1][0]) or \
-       in_band(peak_h, COLOR_RANGES["red2"][0][0], COLOR_RANGES["red2"][1][0]):
+    if any(in_band(peak_h, rng[0][0], rng[1][0]) for rng in (COLOR_RANGES["red1"], COLOR_RANGES["red2"])):
         return "red"
-
-    for name in ["green", "blue", "purple"]:
-        lo, hi = COLOR_RANGES[name][0][0], COLOR_RANGES[name][1][0]
+    for cname in ["yellow", "orange", "green", "blue", "purple"]:
+        lo, hi = COLOR_RANGES[cname][0][0], COLOR_RANGES[cname][1][0]
         if in_band(peak_h, lo, hi):
-            return name
-    return "mixed"
-
-
-    print(f"[DBG] peakH={peak_h} -> mixed", flush=True)
+            return cname
     return "mixed"
 
 
@@ -318,18 +396,14 @@ def _draw_legend(vis, counts, start=(10, 10), box=18, gap=6):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (30, 30, 30), 2, cv2.LINE_AA)
         y += box + gap
 
-def annotate_and_export(bgr, hsv, detections, masks, out_png, out_csv):
-    vis = bgr.copy()
+def annotate_and_export(base_bgr, detections, *, out_png, out_csv, params, scale):
+    vis = base_bgr.copy()
     rows = []
 
     for det in detections:
-        if det["cnt"] is not None:
-            color = classify_color(hsv, det, masks)
-        else:
-            color = classify_color_in_circle(hsv, det["cx"], det["cy"], det["r"], COLOR_RANGES)
-
-        cx, cy = int(det["cx"]), int(det["cy"])
-        r = int(det["r"])
+        color = det.get("color", "mixed")
+        cx, cy = int(round(det["cx"])), int(round(det["cy"]))
+        r = max(1, int(round(det["r"])))
         bgr_col = VIS_COLORS.get(color, VIS_COLORS["mixed"])
 
         cv2.circle(vis, (cx, cy), r, bgr_col, 2)
@@ -338,12 +412,13 @@ def annotate_and_export(bgr, hsv, detections, masks, out_png, out_csv):
 
         rows.append({
             "id": det["id"],
-            "x": cx,
-            "y": cy,
-            "radius_px": det["r"],
-            "area_px": det["area"],
-            "circularity": det["circularity"],
-            "color": color
+            "x": float(det["cx"]),
+            "y": float(det["cy"]),
+            "radius_px": float(det["r"]),
+            "area_px": float(det["area"]),
+            "circularity": float(det["circularity"]),
+            "color": color,
+            "source": det.get("source", "contour"),
         })
 
     df = pd.DataFrame(rows)
@@ -353,10 +428,8 @@ def annotate_and_export(bgr, hsv, detections, masks, out_png, out_csv):
     if out_png:
         cv2.imwrite(out_png, vis)
     if out_csv:
-        # 1) részletes táblázat (változatlan)
         df.to_csv(out_csv, index=False)
 
-        # 2) summary csv: per-color + összeg + átlagok + paraméterek
         summary = {
             "total": int(len(df)),
             "avg_radius_px": float(df["radius_px"].mean()) if not df.empty else 0.0,
@@ -364,19 +437,17 @@ def annotate_and_export(bgr, hsv, detections, masks, out_png, out_csv):
             "circularity_mean": float(df["circularity"].mean()) if not df.empty else 0.0,
             "counts": counts,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "scale_used": scale,
         }
-        # paraméterek egyszerű dumpja
-        try:
-            from dataclasses import asdict
-            summary["params"] = asdict(params_attached)  # lásd lent: params átadása
-        except Exception:
-            pass
+
+        from dataclasses import asdict
+        summary["params"] = asdict(params)
 
         import os
-        stem, ext = os.path.splitext(out_csv)
+        stem, _ = os.path.splitext(out_csv)
         pd.DataFrame([{
             **{f"count_{k}": v for k, v in counts.items()},
-            **{k: v for k, v in summary.items() if k not in ["counts","params"]},
+            **{k: v for k, v in summary.items() if k not in ["counts", "params"]},
             "params_json": json.dumps(summary.get("params", {})),
         }]).to_csv(stem + "_summary.csv", index=False)
 
@@ -384,31 +455,50 @@ def annotate_and_export(bgr, hsv, detections, masks, out_png, out_csv):
 
 
 def run(image_path: str, params: Params, out_png: str, out_csv: str):
-    global params_attached
-    params_attached = params  # így a metrikák exportja el fogja érni
     bgr = cv2.imread(image_path)
 
     if bgr is None:
         raise FileNotFoundError(image_path)
 
-    bgr_p, hsv, scale = preprocess(bgr, params)
+    bgr_proc, hsv, scale = preprocess(bgr, params)
 
-    if params.use_hough:
-        # Színtől független kördetektálás; a színt a kör belsejéből becsüljük
-        detections = find_candies_hough(bgr_p, hsv, params)
-        masks = make_color_masks(hsv)  # legenda miatt hasznos
-        maybe_save_masks(masks, out_png)
-        mask_all = None
+    masks = make_color_masks(hsv)
+    maybe_save_masks(masks, out_png)
+
+    combined_mask = combine_masks(masks)
+    mask_all = morphology(combined_mask, params)
+
+    color_dets = find_candies_per_color(bgr_proc, masks, params)
+
+    if params.use_watershed:
+        contour_dets, _ = watershed_split(bgr_proc, mask_all, params)
     else:
-        masks = make_color_masks(hsv)
-        # (opcionális) debug maszkok
-        # _debug_save_masks(masks, os.path.join(os.path.dirname(out_png), "masks"))
+        contour_dets = find_candies(bgr_proc, mask_all, params)
 
-        mask_all = morphology(combine_masks(masks), params)
-        if params.use_watershed:
-            detections, _ = watershed_split(bgr_p, mask_all, params)
+    hough_dets = find_candies_hough(bgr_proc, hsv, params) if params.use_hough else []
+    detections = _merge_detections(color_dets, contour_dets, hough_dets)
+
+    for det in detections:
+        if det.get("color_hint"):
+            det["color"] = det["color_hint"].replace("mask_", "") if det["color_hint"].startswith("mask_") else det["color_hint"]
+        elif det.get("cnt") is not None:
+            det["color"] = classify_color(hsv, det, masks)
         else:
-            detections = find_candies(bgr_p, mask_all, params)
+            det["color"] = classify_color_in_circle(hsv, det["cx"], det["cy"], det["r"], masks)
 
-    vis, df, counts = annotate_and_export(bgr_p, hsv, detections, masks, out_png, out_csv)
-    return vis, df, mask_all, counts, scalek
+    rescaled = [_rescale_detection(det, scale) for det in detections]
+
+    vis, df, counts = annotate_and_export(
+        bgr,
+        rescaled,
+        out_png=out_png,
+        out_csv=out_csv,
+        params=params,
+        scale=scale,
+    )
+
+    mask_export = mask_all
+    if scale != 1.0:
+        mask_export = cv2.resize(mask_all, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    return vis, df, mask_export, counts, scale

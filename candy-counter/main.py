@@ -12,24 +12,33 @@ def apply_preset(p, name):
         p.hough_maxRadius = 100
         p.min_area = 130
         p.blur_ksize = 3
+        p.use_watershed = False
     elif name == "balanced":
         p.hough_dp = 0.95
-        p.hough_minDist = 72
-        p.hough_param1 = 95
-        p.hough_param2 = 18
+        p.hough_minDist = 58
+        p.hough_param1 = 92
+        p.hough_param2 = 16
         p.hough_minRadius = 30
         p.hough_maxRadius = 105
         p.min_area = 110
         p.blur_ksize = 3
+        p.use_watershed = True
+        p.dt_thresh_ratio = 0.42
+        p.morph_open = 3
+        p.morph_close = 4
     elif name == "aggressive":
         p.hough_dp = 0.9
-        p.hough_minDist = 60
-        p.hough_param1 = 90
-        p.hough_param2 = 14
-        p.hough_minRadius = 28
-        p.hough_maxRadius = 110
-        p.min_area = 90
+        p.hough_minDist = 52
+        p.hough_param1 = 88
+        p.hough_param2 = 13
+        p.hough_minRadius = 26
+        p.hough_maxRadius = 112
+        p.min_area = 85
         p.blur_ksize = 3
+        p.use_watershed = True
+        p.dt_thresh_ratio = 0.4
+        p.morph_open = 2
+        p.morph_close = 5
     elif name == "stuck":
         p.use_watershed = True
         p.dt_thresh_ratio = 0.45
@@ -43,7 +52,7 @@ def main():
 
     ap.add_argument("--input", "-i", required=True, help="Bemeneti kép (pl. data/samples/candy.jpg)")
     ap.add_argument("--outdir", "-o", default="exports", help="Kimeneti mappa")
-    ap.add_argument("--min-area", type=int, default=150)
+    ap.add_argument("--min-area", type=int, default=120)
     ap.add_argument("--circ-min", type=float, default=0.6)
     ap.add_argument("--open", type=int, default=3)
     ap.add_argument("--close", type=int, default=3)

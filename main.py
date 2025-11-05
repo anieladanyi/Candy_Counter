@@ -12,6 +12,7 @@ def apply_preset(p, name):
         p.hough_maxRadius = 100
         p.min_area = 130
         p.blur_ksize = 3
+        p.use_watershed = False
     elif name == "balanced":
         p.hough_dp = 0.95
         p.hough_minDist = 72

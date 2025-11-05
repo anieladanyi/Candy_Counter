@@ -1,0 +1,2 @@
+count_orange,count_red,total,avg_radius_px,avg_area_px,circularity_mean,generated_at,params_json
+1,1,2,93.5,27465.373774008767,1.0,2025-11-05 18:30:19,"{""blur_ksize"": 3, ""morph_open"": 3, ""morph_close"": 3, ""min_area"": 110, ""max_area"": 200000, ""circularity_min"": 0.6, ""downscale_max"": 1400, ""use_watershed"": false, ""dt_thresh_ratio"": 0.4, ""use_hough"": true, ""hough_dp"": 0.95, ""hough_minDist"": 72, ""hough_param1"": 95, ""hough_param2"": 18, ""hough_minRadius"": 30, ""hough_maxRadius"": 105}"

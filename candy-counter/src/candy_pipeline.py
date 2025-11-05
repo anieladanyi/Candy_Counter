@@ -17,18 +17,21 @@ def _debug_save_masks(masks, out_dir):
 # HSV színtartományok (finomítható – jelenleg kissé szigorúbb S/V a háttér kizárására)
 COLOR_RANGES = {
     # A vörös továbbra is két sávból áll, így lefedi a 0 körüli H értékeket
-    "red1":   ((0,   36, 30), (8, 255, 255)),
-    "red2":   ((168, 36, 30), (179, 255, 255)),
+    "red1":   ((0,   32, 28), (8, 255, 255)),
+    "red2":   ((168, 32, 28), (179, 255, 255)),
 
     # Narancs és sárga határértékek: lazább S/V, hogy a világosabb cukorkák és fakó sarkok se essenek ki
-    "orange": ((7,   24, 40), (22, 255, 255)),
-    "yellow": ((18,  18, 55), (45, 255, 255)),
+    "orange": ((6,   18, 38), (22, 255, 255)),
+    "yellow": ((18,  12, 50), (48, 255, 255)),
 
     # A többi színhez elegendő a korábbi tartomány, de engedünk a minimális telítettségen/fényességen
-    "green":  ((50,  28, 40), (85, 255, 255)),
-    "blue":   ((90,  28, 40), (125,255, 255)),
-    "purple": ((125, 28, 40), (170,255, 255)),
+    "green":  ((50,  24, 38), (85, 255, 255)),
+    "blue":   ((90,  24, 38), (125,255, 255)),
+    "purple": ((125, 24, 38), (170,255, 255)),
 }
+
+_GLOBAL_S_MIN = min(rng[0][1] for rng in COLOR_RANGES.values())
+_GLOBAL_V_MIN = min(rng[0][2] for rng in COLOR_RANGES.values())
 
 
 
@@ -348,7 +351,9 @@ def classify_color_in_circle(hsv, cx, cy, r, masks):
     cv2.circle(region_mask, (int(cx), int(cy)), max(int(r * 0.88), 1), 255, -1)
 
     S = hsv[:, :, 1]; V = hsv[:, :, 2]
-    sv_mask = ((S >= 24) & (V >= 42)).astype(np.uint8) * 255
+    s_floor = max(10, _GLOBAL_S_MIN - 2)
+    v_floor = max(10, _GLOBAL_V_MIN - 2)
+    sv_mask = ((S >= s_floor) & (V >= v_floor)).astype(np.uint8) * 255
     region_mask = cv2.bitwise_and(region_mask, sv_mask)
 
     best_color, best_hits = "mixed", 0
